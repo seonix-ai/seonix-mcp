@@ -1,0 +1,50 @@
+{
+  "name": "seonix-seo-mcp",
+  "version": "2.0.0",
+  "description": "Free, open-source, platform-agnostic MCP server that lets any AI agent audit ANY website for SEO / GEO / AEO and speed problems and report how-it-should-be recommendations. Read-only — it never modifies your site.",
+  "license": "MIT",
+  "author": "Seonix <info@seonix.ai>",
+  "homepage": "https://github.com/Effect-Agency/seonix-seo-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Effect-Agency/seonix-seo-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "seo",
+    "geo",
+    "aeo",
+    "core-web-vitals",
+    "pagespeed",
+    "lighthouse",
+    "speed",
+    "audit",
+    "claude",
+    "cursor"
+  ],
+  "type": "module",
+  "bin": {
+    "seonix-seo-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
