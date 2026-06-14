@@ -28,22 +28,35 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import {
+  checkBoilerplateHeadings,
+  checkBrokenInternalLinks,
+  checkCrawlDepth,
+  checkDuplicates,
   checkLlmsTxt,
+  checkOrphanedPages,
   checkPage,
+  checkPaginationNoindexRecommendation,
   checkRobotsAiBots,
   checkSpeedHeuristics,
+  extractRobotsSitemaps,
+  looksLikeXml,
+  normalizeUrlKey,
   parsePage,
+  parseSitemapXml,
   parsePsiResponse,
   psiToIssues,
+  robotsAllows,
   type Issue,
   type IssueCategory,
+  type PageData,
   type PsiApiResponse,
   type PsiSummary,
 } from "./audit.js";
 import { recommendationFor } from "./recommendations.js";
+import { proposeFixes, previewFix, type FixProposal } from "./fixes.js";
 
-const PKG_VERSION = "2.0.0";
-const USER_AGENT = `seonix-seo-mcp/${PKG_VERSION} (+https://github.com/Effect-Agency/seonix-seo-mcp)`;
+const PKG_VERSION = "2.2.0";
+const USER_AGENT = `seonix-seo-mcp/${PKG_VERSION} (+https://github.com/seonix-ai/seonix-mcp)`;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -83,6 +96,50 @@ async function fetchText(url: string, timeoutMs = 20000): Promise<FetchTextResul
   }
 }
 
+/**
+ * Fetch a page following redirects MANUALLY so we can record the chain (needed
+ * for broken_redirect / redirect_loop / too_many_redirects). Each 3xx hop is
+ * recorded; the final response's body/status/url are returned. Caps at 10 hops.
+ * Never throws on HTTP status — only network/timeout failure (status 0).
+ */
+async function fetchPage(
+  url: string,
+  timeoutMs = 20000,
+): Promise<FetchTextResult & { redirectChain: { url: string; statusCode: number }[] }> {
+  const chain: { url: string; statusCode: number }[] = [];
+  let current = url;
+  for (let hop = 0; hop < 10; hop++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(current, {
+        redirect: "manual",
+        signal: controller.signal,
+        headers: { "User-Agent": USER_AGENT, Accept: "text/html,application/xhtml+xml,text/plain,*/*" },
+      });
+      const loc = res.headers.get("location");
+      if (res.status >= 300 && res.status < 400 && loc) {
+        chain.push({ url: current, statusCode: res.status });
+        try {
+          current = new URL(loc, current).toString();
+        } catch {
+          // Unparseable Location — treat the 3xx as the final response.
+          return { status: res.status, finalUrl: current, body: "", headers: res.headers, redirectChain: chain };
+        }
+        continue;
+      }
+      const body = await res.text();
+      return { status: res.status, finalUrl: current, body, headers: res.headers, redirectChain: chain };
+    } catch {
+      return { status: 0, finalUrl: current, body: "", headers: new Headers(), redirectChain: chain };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  // Exceeded the hop cap — return a sentinel so too_many_redirects/loop fire.
+  return { status: chain[chain.length - 1]?.statusCode ?? 0, finalUrl: current, body: "", headers: new Headers(), redirectChain: chain };
+}
+
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 function normalizeSiteUrl(raw: string): string {
@@ -98,68 +155,185 @@ function originOf(siteUrl: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Sitemap discovery
+// Site discovery + crawlability checks (sitemap + robots.txt, one pass)
 // ---------------------------------------------------------------------------
 
-/**
- * Discover up to `cap` page URLs for a site, politely.
- *
- * Strategy: read /sitemap.xml (and sitemap_index.xml). Sitemap indexes are
- * followed one level deep into child sitemaps. We extract <loc> values and
- * cap the total. Falls back to just the homepage if nothing is found.
- */
-async function discoverUrls(siteUrl: string, cap: number): Promise<{ urls: string[]; source: string }> {
-  const origin = originOf(siteUrl);
-  const candidates = [`${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`, `${origin}/wp-sitemap.xml`];
-
-  const collected = new Set<string>();
-  let source = "homepage-fallback";
-
-  for (const sm of candidates) {
-    const res = await fetchText(sm);
-    if (res.status < 200 || res.status >= 300 || !res.body.includes("<")) continue;
-    source = sm;
-
-    const locs = extractLocs(res.body);
-    const childSitemaps = res.body.includes("<sitemapindex") ? locs.filter((l) => /\.xml(\.gz)?($|\?)/i.test(l)) : [];
-
-    if (childSitemaps.length > 0) {
-      // Sitemap index — descend one level, politely (~1 req/sec).
-      for (const child of childSitemaps) {
-        if (collected.size >= cap) break;
-        await sleep(1000);
-        const c = await fetchText(child);
-        if (c.status < 200 || c.status >= 300) continue;
-        for (const loc of extractLocs(c.body)) {
-          if (/\.xml(\.gz)?($|\?)/i.test(loc)) continue; // skip nested sitemaps
-          if (collected.size >= cap) break;
-          collected.add(loc);
-        }
-      }
-    } else {
-      for (const loc of locs) {
-        if (collected.size >= cap) break;
-        collected.add(loc);
-      }
-    }
-    if (collected.size > 0) break;
-  }
-
-  if (collected.size === 0) {
-    return { urls: [origin + "/"], source };
-  }
-  return { urls: [...collected].slice(0, cap), source };
+interface SiteDiscovery {
+  /** Page URLs to audit (capped). */
+  urls: string[];
+  /** The sitemap (or "homepage-fallback") the URLs came from. */
+  source: string;
+  /** Normalized page URLs found in the sitemap(s), for the inSitemap flag. */
+  sitemapSet: Set<string>;
+  /** Crawlability findings: robots.txt + sitemap (group B). */
+  siteIssues: Issue[];
+  /** robots.txt HTTP status + body (null when not 2xx) — reused for AI-bot check. */
+  robotsStatus: number;
+  robotsBody: string | null;
 }
+
+const SITEMAP_DEFAULT_PATHS = ["/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml"];
 
 /** Extract <loc>…</loc> values from a sitemap XML body. */
 function extractLocs(xml: string): string[] {
   const out: string[] = [];
   const re = /<loc>\s*([^<\s]+)\s*<\/loc>/gi;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(xml)) !== null) {
-    out.push(m[1].trim());
-  }
+  while ((m = re.exec(xml)) !== null) out.push(m[1].trim());
   return out;
+}
+
+const NESTED_SITEMAP_RE = /\.xml(\.gz)?($|\?)/i;
+function pathOf(u: string): string {
+  try {
+    return new URL(u).pathname;
+  } catch {
+    return u;
+  }
+}
+function ctIsXml(headers: Headers): boolean {
+  return (headers.get("content-type") || "").toLowerCase().includes("xml");
+}
+
+/**
+ * Discover page URLs AND run robots.txt + sitemap crawlability checks in one
+ * pass (so we fetch robots/sitemaps once). Mirrors the scanner's
+ * CheckCrawlability + CheckAEOSitemapQuality, minus the Googlebot-replay checks
+ * (googlebot_blocked / googlebot_challenge) which need a UA spoof.
+ */
+async function discoverAndCheckSite(siteUrl: string, cap: number): Promise<SiteDiscovery> {
+  const origin = originOf(siteUrl);
+  const siteIssues: Issue[] = [];
+
+  // --- robots.txt ---
+  const robotsRes = await fetchText(`${origin}/robots.txt`);
+  const robotsOk = robotsRes.status >= 200 && robotsRes.status < 300;
+  const robotsBody = robotsOk ? robotsRes.body : "";
+  const robotsUrl = `${origin}/robots.txt`;
+
+  if (robotsRes.status === 404) {
+    siteIssues.push({ code: "robots_missing", severity: "notice", url: robotsUrl, message: "No robots.txt found at the site root.", evidence: { status: 404 } });
+  }
+  if (robotsOk && !robotsAllows(robotsBody, "Googlebot", "/")) {
+    siteIssues.push({ code: "robots_blocks_all", severity: "error", url: robotsUrl, message: "robots.txt disallows Googlebot from crawling the site root.", evidence: { checked_url: `${origin}/`, user_agent: "Googlebot" } });
+  }
+
+  const declared = robotsOk ? [...new Set(extractRobotsSitemaps(robotsBody))] : [];
+  const candidates = [...new Set([...declared, ...SITEMAP_DEFAULT_PATHS.map((p) => origin + p)])];
+
+  if (robotsOk) {
+    for (const sm of candidates) {
+      if (!robotsAllows(robotsBody, "Googlebot", pathOf(sm))) {
+        siteIssues.push({ code: "robots_blocks_sitemap_path", severity: "warning", url: sm, message: "robots.txt disallows the path to this sitemap.", evidence: { sitemap_url: sm } });
+      }
+    }
+  }
+
+  // --- sitemap probing + URL discovery + lastmod coverage ---
+  const collected = new Set<string>();
+  let source = "homepage-fallback";
+  let anyWorking = false;
+  let lastmodTotal = 0;
+  let lastmodWith = 0;
+  let emittedUnreachable = false;
+  let firstWorkingSitemap = "";
+  let polite = false;
+
+  for (const sm of candidates) {
+    if (anyWorking && collected.size >= cap) break;
+    if (polite) await sleep(1000);
+    polite = true;
+    const res = await fetchText(sm);
+    const ok2xx = res.status >= 200 && res.status < 300;
+    const isDeclared = declared.includes(sm);
+
+    if (!ok2xx) {
+      // Only flag an explicitly-declared sitemap that fails; a missing default
+      // path (most sites have just one) is handled by the no-sitemap fallback.
+      if (isDeclared) {
+        siteIssues.push({ code: "sitemap_unreachable", severity: "error", url: sm, message: `Sitemap returned HTTP ${res.status || "(network error)"}.`, evidence: { url: sm, status_seonix: res.status } });
+        emittedUnreachable = true;
+      }
+      continue;
+    }
+    if (!looksLikeXml(res.body) && !ctIsXml(res.headers)) {
+      siteIssues.push({ code: "sitemap_invalid_xml", severity: "error", url: sm, message: "Sitemap returned 200 but the body is not XML.", evidence: { url: sm, content_type: res.headers.get("content-type") || "" } });
+      continue;
+    }
+    const parsed = parseSitemapXml(res.body);
+    if (parsed.kind === "unknown") {
+      siteIssues.push({ code: "sitemap_invalid_xml", severity: "error", url: sm, message: "Sitemap XML root is not <urlset> or <sitemapindex>.", evidence: { url: sm } });
+      continue;
+    }
+
+    anyWorking = true;
+    if (firstWorkingSitemap === "") firstWorkingSitemap = sm;
+    if (source === "homepage-fallback") source = sm;
+
+    if (parsed.kind === "urlset") {
+      if (parsed.urlCount === 0) {
+        siteIssues.push({ code: "sitemap_empty", severity: "warning", url: sm, message: "Sitemap parses but contains zero URLs.", evidence: { url: sm } });
+      }
+      lastmodTotal += parsed.urlCount;
+      lastmodWith += parsed.lastmodCount;
+      for (const loc of extractLocs(res.body)) {
+        if (collected.size >= cap) break;
+        if (!NESTED_SITEMAP_RE.test(loc)) collected.add(loc);
+      }
+    } else {
+      // sitemap index — descend one level into child sitemaps.
+      if (parsed.childLocs.length === 0) {
+        siteIssues.push({ code: "sitemap_empty", severity: "warning", url: sm, message: "Sitemap index references zero child sitemaps.", evidence: { url: sm } });
+      }
+      let childFailed = false;
+      for (const child of parsed.childLocs) {
+        if (collected.size >= cap) break;
+        await sleep(1000);
+        const c = await fetchText(child);
+        if (c.status < 200 || c.status >= 300) {
+          childFailed = true;
+          continue;
+        }
+        const cp = parseSitemapXml(c.body);
+        lastmodTotal += cp.urlCount;
+        lastmodWith += cp.lastmodCount;
+        for (const loc of extractLocs(c.body)) {
+          if (collected.size >= cap) break;
+          if (!NESTED_SITEMAP_RE.test(loc)) collected.add(loc);
+        }
+      }
+      if (childFailed) {
+        siteIssues.push({ code: "sitemap_index_children_failed", severity: "error", url: sm, message: "Sitemap index opens but one or more child sitemaps could not be fetched.", evidence: { url: sm } });
+      }
+    }
+  }
+
+  // No sitemap reachable at all → flag the canonical /sitemap.xml once.
+  if (!anyWorking && !emittedUnreachable) {
+    siteIssues.push({ code: "sitemap_unreachable", severity: "error", url: `${origin}/sitemap.xml`, message: "No reachable sitemap found (tried robots.txt declarations and the common default paths).", evidence: { tried: candidates } });
+  }
+
+  // sitemap_not_declared_in_robots: a working sitemap exists but robots.txt
+  // (present) never declared it.
+  if (declared.length === 0 && anyWorking && robotsRes.status === 200) {
+    siteIssues.push({ code: "sitemap_not_declared_in_robots", severity: "notice", url: robotsUrl, message: "A working sitemap exists but robots.txt has no Sitemap: directive.", evidence: { sitemap_url: firstWorkingSitemap } });
+  }
+
+  // aeo_sitemap_lastmod_missing: <80% of URLs carry a <lastmod>.
+  if (lastmodTotal > 0 && lastmodWith / lastmodTotal < 0.8) {
+    siteIssues.push({
+      code: "aeo_sitemap_lastmod_missing",
+      category: "aeo",
+      severity: "notice",
+      url: firstWorkingSitemap || `${origin}/sitemap.xml`,
+      message: `Only ${Math.round((lastmodWith / lastmodTotal) * 100)}% of sitemap URLs carry a <lastmod> (recommended 80%+).`,
+      evidence: { total_urls: lastmodTotal, urls_with_lastmod: lastmodWith, coverage_percent: Math.round((lastmodWith / lastmodTotal) * 100) },
+    });
+  }
+
+  const urls = collected.size === 0 ? [origin + "/"] : [...collected].slice(0, cap);
+  const sitemapSet = new Set([...collected].map((u) => normalizeUrlKey(u)));
+  return { urls, source, sitemapSet, siteIssues, robotsStatus: robotsRes.status, robotsBody: robotsOk ? robotsBody : null };
 }
 
 // ---------------------------------------------------------------------------
@@ -271,18 +445,20 @@ async function runAudit(siteUrlRaw: string, opts: AuditOptions): Promise<AuditRe
   const siteUrl = normalizeSiteUrl(siteUrlRaw);
   const cap = Math.max(1, Math.min(opts.maxPages, 100));
 
-  const { urls, source } = await discoverUrls(siteUrl, cap);
+  const { urls, source, sitemapSet, siteIssues, robotsStatus, robotsBody } = await discoverAndCheckSite(siteUrl, cap);
 
   const rawIssues: Issue[] = [];
+  const pages: PageData[] = [];
 
   // Polite, sequential page fetches (~1 req/sec) — this is a read-only audit
   // against a stranger's site; we do not hammer it. HTML checks (SEO + AEO +
-  // always-on speed heuristics) run on every fetched page.
+  // always-on speed heuristics) run on every fetched page. We follow redirects
+  // manually so each page carries its redirect chain.
   for (let i = 0; i < urls.length; i++) {
     if (i > 0) await sleep(1000);
     const url = urls[i];
-    const res = await fetchText(url);
-    if (res.status === 0) {
+    const res = await fetchPage(url);
+    if (res.status === 0 && res.redirectChain.length === 0) {
       rawIssues.push({ code: "fetch_failed", category: "seo", severity: "error", url, message: "Could not fetch the page (network error or timeout)." });
       continue;
     }
@@ -291,15 +467,32 @@ async function runAudit(siteUrlRaw: string, opts: AuditOptions): Promise<AuditRe
       finalUrl: res.finalUrl,
       xRobotsTag: res.headers.get("x-robots-tag") || "",
     });
+    // Fill the crawl metadata parsePage can't know from a single page's HTML.
+    page.redirectChain = res.redirectChain;
+    page.inSitemap = sitemapSet.has(normalizeUrlKey(url));
+    pages.push(page);
     rawIssues.push(...checkPage(page));
   }
 
-  // Site-level checks: /llms.txt and /robots.txt (one fetch each).
+  // Cross-page checks (need the full page set): duplicates, boilerplate
+  // headings, pagination noindex.
+  rawIssues.push(...checkDuplicates(pages));
+  rawIssues.push(...checkBoilerplateHeadings(pages));
+  rawIssues.push(...checkPaginationNoindexRecommendation(pages));
+
+  // Crawl-graph checks: broken internal links, orphaned pages, crawl depth.
+  rawIssues.push(...checkBrokenInternalLinks(pages));
+  rawIssues.push(...checkOrphanedPages(pages));
+  rawIssues.push(...checkCrawlDepth(pages, siteUrl));
+
+  // Crawlability findings (robots.txt + sitemap) gathered during discovery.
+  rawIssues.push(...siteIssues);
+
+  // Site-level checks: /llms.txt (one fetch) + robots.txt AI-bot block
+  // (reusing the robots body already fetched during discovery).
   const llms = await fetchText(`${originOf(siteUrl)}/llms.txt`);
   rawIssues.push(...checkLlmsTxt(siteUrl, llms.status, llms.status >= 200 && llms.status < 300 ? llms.body : null));
-
-  const robots = await fetchText(`${originOf(siteUrl)}/robots.txt`);
-  rawIssues.push(...checkRobotsAiBots(siteUrl, robots.status, robots.status >= 200 && robots.status < 300 ? robots.body : null));
+  rawIssues.push(...checkRobotsAiBots(siteUrl, robotsStatus, robotsBody));
 
   // Speed via PSI (slow) — only a small representative sample, only when a key
   // is configured. Each measured page contributes Lighthouse-derived issues.
@@ -408,7 +601,13 @@ const TOOLS: Tool[] = [
   {
     name: "audit_site",
     description:
-      "READ-ONLY, platform-agnostic site auditor. Works on ANY website (WordPress, Shopify, custom, static — anything). Audits SEO, GEO/AEO and speed: it SHOWS problems and gives CMS-neutral 'how it should be' recommendations — it does NOT modify the site; you decide whether/how to fix. Discovers pages via sitemap.xml (polite ~1 req/sec, default 25 / max 100 pages), fetches each page's HTML, and runs: title/meta-description length, image alt text, H1 count, emoji/overlong/before-H1/broken-hierarchy headings, mixed content, JSON-LD Article author/dates + structured-data validity, AI-restrictive meta robots, /llms.txt, robots.txt AI-bot blocking, canonical, viewport, Open Graph — PLUS always-on speed heuristics (render-blocking head resources, images missing width/height, un-lazy offscreen images, large inline blocks, page weight, DOM size). When PAGESPEED_API_KEY is set, it also runs Google PageSpeed Insights (Core Web Vitals + Lighthouse opportunities) on a small sample of pages. Returns a per-pillar summary {seo, aeo, speed} (score + health_label + issue count) and a flat issues[] where each item = {code, category, severity, url, evidence, why, target_state, recommendation}.",
+      "READ-ONLY, platform-agnostic site auditor. Works on ANY website (WordPress, Shopify, custom, static — anything). Audits SEO, GEO/AEO and speed: it SHOWS problems and gives CMS-neutral 'how it should be' recommendations — it does NOT modify the site; you decide whether/how to fix. Discovers pages via sitemap.xml (polite ~1 req/sec, default 25 / max 100 pages), fetches each page's HTML (following redirects so it can flag redirect chains), and runs ~75 checks: " +
+      "PER PAGE — title missing/length/HTML-entities/lowercase-start, meta description missing/length, image alt text, H1 count, emoji/overlong/before-H1/broken-hierarchy headings, low word count, no internal links, noindex, large page, soft-404, mixed content, canonical, viewport, Open Graph, structured-data validity; " +
+      "GEO/AEO — JSON-LD Article author-not-Person / missing dates / duplicate-type / conflicting-data / unrecognized @type / incomplete Person, FAQ & HowTo schema not visible on-page, incomplete social tags, AI-restrictive meta robots, /llms.txt, robots.txt AI-bot blocking, sitemap lastmod coverage; " +
+      "CROSS-PAGE / CRAWL — duplicate titles & meta descriptions, trailing-slash duplicates, boilerplate repeated headings, broken internal links, orphaned pages, crawl depth, redirect chains (broken/loop/too-many); " +
+      "SITE — robots.txt missing/blocks-all/blocks-sitemap-path, sitemap unreachable/invalid/empty/index-children-failed/not-declared-in-robots; " +
+      "SPEED — always-on HTML heuristics (render-blocking head resources, images missing width/height, un-lazy offscreen images, large inline blocks, page weight, DOM size), plus Google PageSpeed Insights (Core Web Vitals + Lighthouse opportunities) on a sample of pages when PAGESPEED_API_KEY is set. " +
+      "Returns a per-pillar summary {seo, aeo, speed} (score + health_label + issue count) and a flat issues[] where each item = {code, category, severity, url, evidence, why, target_state, recommendation}.",
     inputSchema: {
       type: "object",
       properties: {
@@ -434,6 +633,38 @@ const TOOLS: Tool[] = [
         url: { type: "string", description: "The exact page URL to measure, e.g. https://example.com/pricing" },
       },
       required: ["url"],
+    },
+  },
+  {
+    name: "propose_fixes",
+    description:
+      "READ-ONLY safe-fix ADVISOR for ONE page. Audits the page, then proposes a concrete, minimal fix for each issue: what to change, whether the change is VISIBLE or INVISIBLE to visitors, which issue code(s) it clears, and safety notes. Deterministic fixes carry an exact edit (inject viewport / Open Graph tags, decode HTML entities in the title, strip a leading heading emoji, rewrite http:// → https://, retag a heading that skips a level). Others are classified: 'needs-value' (alt text, dates, og:image — mechanical but a value must be supplied), 'manual' (a content/structure decision, guidance only), or 'infra' (server / robots.txt / sitemap / CDN / speed — not page markup). It NEVER writes anything. Pass any returned proposal to preview_fix to dry-run it before deciding.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "The exact page URL to propose fixes for, e.g. https://example.com/pricing" },
+        codes: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional: only propose fixes for these issue codes (e.g. [\"missing_viewport\",\"title_html_entities\"]).",
+        },
+      },
+      required: ["url"],
+    },
+  },
+  {
+    name: "preview_fix",
+    description:
+      "READ-ONLY dry-run of a single fix proposal (the object returned by propose_fixes) against the page's CURRENT HTML. Applies the edit statically — no rendering, no writing — and returns a regression-gate verdict: 'pass' (the edit is localized and touches only its intended region), 'idempotent' (already applied — a no-op), 'blocked' (the target is ambiguous or missing, so an automatic edit is unsafe), or 'manual' (needs a value, or lives in infrastructure). Includes the before/after of the affected region. This is a STRUCTURAL safety gate (does the edit stay in its region?), not a pixel/visual gate. NEVER modifies the site.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fix: {
+          type: "object",
+          description: "A fix proposal object exactly as returned in propose_fixes.proposals[]. Must include url and edit.",
+        },
+      },
+      required: ["fix"],
     },
   },
 ];
@@ -492,6 +723,72 @@ async function dispatch(name: string, args: Record<string, unknown>): Promise<Ca
       out.issue_count = issues.length;
       out.issues = issues;
       return ok(out);
+    }
+
+    case "propose_fixes": {
+      const url = String(args.url ?? "").trim();
+      if (!url) return fail("url is required.");
+      const filterCodes = Array.isArray(args.codes) ? (args.codes as unknown[]).map(String) : null;
+      const normalized = normalizeSiteUrl(url);
+
+      const res = await fetchPage(normalized);
+      if (res.status === 0 && res.redirectChain.length === 0) return fail("Could not fetch the page (network error or timeout).");
+      const page = parsePage(res.body, normalized, {
+        statusCode: res.status,
+        finalUrl: res.finalUrl,
+        xRobotsTag: res.headers.get("x-robots-tag") || "",
+      });
+      page.redirectChain = res.redirectChain;
+
+      let issues: Issue[] = checkPage(page);
+
+      // On the homepage, also surface the light site-level files (llms.txt +
+      // robots AI-bot block) so their fixes can be proposed too. We do NOT run
+      // the full sitemap crawl here — propose_fixes is a single-page tool.
+      let isHome = false;
+      try {
+        isHome = new URL(normalized).pathname === "/" || new URL(normalized).pathname === "";
+      } catch {
+        /* ignore */
+      }
+      if (isHome) {
+        const origin = originOf(normalized);
+        const llms = await fetchText(`${origin}/llms.txt`);
+        issues.push(...checkLlmsTxt(normalized, llms.status, llms.status >= 200 && llms.status < 300 ? llms.body : null));
+        const robots = await fetchText(`${origin}/robots.txt`);
+        issues.push(...checkRobotsAiBots(normalized, robots.status, robots.status >= 200 && robots.status < 300 ? robots.body : null));
+      }
+
+      if (filterCodes) issues = issues.filter((i) => filterCodes.includes(i.code));
+
+      const proposals = proposeFixes(issues, page);
+      const byFamily: Record<string, number> = {};
+      const byVisibility: Record<string, number> = {};
+      for (const p of proposals) {
+        byFamily[p.family] = (byFamily[p.family] ?? 0) + 1;
+        byVisibility[p.visibility] = (byVisibility[p.visibility] ?? 0) + 1;
+      }
+      return ok({
+        url: normalized,
+        issue_count: issues.length,
+        proposal_count: proposals.length,
+        proposals_by_family: byFamily,
+        proposals_by_visibility: byVisibility,
+        note: "Read-only proposals. Pass any proposal to preview_fix to dry-run it. This server never writes to the site.",
+        proposals,
+      });
+    }
+
+    case "preview_fix": {
+      const fix = args.fix as FixProposal | undefined;
+      if (!fix || typeof fix !== "object" || !fix.url || !fix.edit) {
+        return fail("fix is required and must be a proposal object from propose_fixes (with url + edit).");
+      }
+      const normalized = normalizeSiteUrl(String(fix.url));
+      const res = await fetchText(normalized);
+      if (res.status === 0) return fail("Could not fetch the page to preview against (network error or timeout).");
+      const result = previewFix(fix, res.body);
+      return ok(result);
     }
 
     default:

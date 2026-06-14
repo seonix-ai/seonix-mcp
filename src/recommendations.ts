@@ -418,6 +418,322 @@ const RECOMMENDATIONS: Record<string, Recommendation> = {
     recommendation:
       "Reduce the HTML payload: trim inline assets, remove dead markup and duplicated content, and lazy-load below-the-fold sections.",
   },
+
+  // -------------------------------------------------------------------------
+  // HTTP status / fetch
+  // -------------------------------------------------------------------------
+  http_4xx: {
+    category: "seo",
+    severity: "error",
+    why: "A page returning a 4xx client error (404 Not Found, 403 Forbidden, …) is inaccessible to visitors and search engines. Links to it waste crawl budget and lead users to a dead end.",
+    target_state: "The URL returns 200, or is intentionally removed with a 301 redirect to a live replacement (or a proper 410/404 if truly gone).",
+    recommendation:
+      "If the page should exist, fix what makes it return an error. If it moved, 301-redirect the old URL to the new one. If it is genuinely gone, remove links pointing to it.",
+  },
+  http_5xx: {
+    category: "seo",
+    severity: "error",
+    why: "A 5xx server error means the page failed to render at all. Search engines that repeatedly hit 5xx may drop the URL from the index, and visitors see a broken site.",
+    target_state: "The URL returns a successful 2xx response reliably.",
+    recommendation:
+      "Check server/application logs for the cause (timeout, fatal error, memory). Fix the underlying error and confirm the page returns 200 consistently.",
+  },
+  fetch_failed: {
+    category: "seo",
+    severity: "error",
+    why: "The auditor could not fetch the page at all — a network error, DNS failure, or timeout. If a crawler sees the same, the page cannot be indexed.",
+    target_state: "The URL responds within a few seconds over a stable connection.",
+    recommendation:
+      "Verify the URL resolves and the server responds promptly. Check DNS, TLS/SSL certificate validity, firewall rules, and response time.",
+  },
+
+  // -------------------------------------------------------------------------
+  // SEO — title quality
+  // -------------------------------------------------------------------------
+  title_html_entities: {
+    category: "seo",
+    severity: "warning",
+    why: "The title contains raw, undecoded HTML entities (e.g. &amp;, &quot;, &#39;). Search engines display the literal entity text in results, which looks like a bug and lowers click-through.",
+    target_state: "The title shows real characters (& \" '), not their HTML entity codes.",
+    recommendation:
+      "Decode the HTML entities in the title before it is stored or rendered: &amp; → &, &quot; → \", &#39; → '. This is usually a double-encoding bug in the CMS or title template.",
+  },
+  title_lowercase: {
+    category: "seo",
+    severity: "notice",
+    why: "The title starts with a lowercase letter. In English, German and Russian, titles are expected to begin with a capital; a lowercase start looks like a typo and weakens brand perception in search results.",
+    target_state: "The title begins with a capital letter (intentional lowercase brands like iPhone or eBay are fine).",
+    recommendation:
+      "Capitalize the first letter of the title, unless it is a deliberate lowercase brand name.",
+  },
+
+  // -------------------------------------------------------------------------
+  // SEO — content / indexability
+  // -------------------------------------------------------------------------
+  low_word_count: {
+    category: "seo",
+    severity: "warning",
+    why: "A page with very little text gives search engines almost nothing to understand or rank, and is often treated as thin content. It rarely satisfies a searcher's intent on its own.",
+    target_state: "The page has enough substantive content (roughly 300+ words) to fully cover its topic.",
+    recommendation:
+      "Expand the page with genuinely useful content that answers the visitor's question — context, detail, examples — rather than padding. If the page is intentionally thin (e.g. a contact page), this can be ignored.",
+  },
+  no_internal_links: {
+    category: "seo",
+    severity: "notice",
+    why: "A page with no links to other pages on the same site is a dead end: it passes no link equity onward and gives visitors nowhere to go, isolating it from the site structure.",
+    target_state: "The page links to other relevant pages on the site (navigation, related content, calls to action).",
+    recommendation:
+      "Add a few contextual internal links to related pages, plus the usual site navigation, so visitors and crawlers can move on from this page.",
+  },
+  noindex_detected: {
+    category: "seo",
+    severity: "warning",
+    why: "The page tells search engines not to index it (via a robots meta tag or X-Robots-Tag header), so it will never appear in search results. This is sometimes intentional and sometimes an accident.",
+    target_state: "Public pages you want found are indexable; only pages you deliberately want hidden carry noindex.",
+    recommendation:
+      "If this page should rank, remove the noindex directive (use index, follow). If it is meant to be hidden (thank-you pages, internal search results), the noindex is correct — no action needed.",
+  },
+  large_page: {
+    category: "seo",
+    severity: "warning",
+    why: "A very large HTML document (over ~3 MB) is slow to download and parse, especially on mobile connections, hurting both user experience and rankings.",
+    target_state: "The HTML document is well under ~3 MB.",
+    recommendation:
+      "Reduce the document size: move large inline styles/scripts to external cacheable files, remove duplicated or dead markup, and paginate or lazy-load very long content.",
+  },
+  soft_404: {
+    category: "seo",
+    severity: "error",
+    why: "The page returns HTTP 200 (success) but is really an error page — it has an error-like title and almost no content. Search engines may index these empty pages, and they confuse crawlers about which URLs are valid.",
+    target_state: "Genuine error pages return a 404 (or 410) status; 200 pages carry real content.",
+    recommendation:
+      "Configure the server/CMS to return a proper 404 status for missing pages. If this URL should have content, restore it.",
+  },
+
+  // -------------------------------------------------------------------------
+  // SEO — duplicates & boilerplate (cross-page)
+  // -------------------------------------------------------------------------
+  duplicate_title: {
+    category: "seo",
+    severity: "warning",
+    why: "Several pages share the exact same title, so search engines cannot tell them apart and may show only one — or none — in results, splitting ranking signals across near-identical pages.",
+    target_state: "Every page has a unique title that describes its specific content.",
+    recommendation:
+      "Give each affected page a distinct title built around its own primary keyword. A common cause is a site-wide title template that doesn't vary per page.",
+  },
+  duplicate_meta_desc: {
+    category: "seo",
+    severity: "warning",
+    why: "Multiple pages share the same meta description, so search snippets look identical and repetitive, and the description fails to sell each page's unique value.",
+    target_state: "Each page has a unique meta description summarizing that specific page.",
+    recommendation:
+      "Write a unique 120–160 character description per affected page. A site-wide default description set globally is the usual root cause — override it per page.",
+  },
+  trailing_slash_duplicate: {
+    category: "seo",
+    severity: "warning",
+    why: "Both the trailing-slash and non-trailing-slash versions of a URL return content, so search engines see two URLs with identical content and may split ranking signals between them.",
+    target_state: "One canonical URL form (with or without the trailing slash) serves the content; the other 301-redirects to it.",
+    recommendation:
+      "Pick one URL form as canonical and 301-redirect the other to it (or at least set a consistent rel=canonical). Configure this at the server or CMS level so it applies site-wide.",
+  },
+  boilerplate_heading_repeated: {
+    category: "seo",
+    severity: "notice",
+    why: "The same heading text appears on more than half the site's pages — typically a widget, sidebar, or CTA block marked up as a heading. Repeated headings add no unique topic signal and dilute each page's distinctiveness.",
+    target_state: "Headings are specific to each page's content; reusable block labels are not marked up as headings.",
+    recommendation:
+      "Make the heading page-specific, or convert the repeated boilerplate label from a heading (<h2>…<h6>) to a styled <div>/<span>. If it comes from a global template/widget, change it once there.",
+  },
+
+  // -------------------------------------------------------------------------
+  // Technical — redirects, links, crawl graph
+  // -------------------------------------------------------------------------
+  broken_redirect: {
+    category: "seo",
+    severity: "error",
+    why: "A redirect chain ends at a broken URL (4xx/5xx), so anyone following the old link still hits an error. The redirect achieves nothing and wastes crawl budget.",
+    target_state: "The source URL redirects in one hop to a live, 200 page.",
+    recommendation:
+      "Update the first redirect to point directly at a working destination, and remove the broken intermediate target.",
+  },
+  redirect_loop: {
+    category: "seo",
+    severity: "error",
+    why: "The redirects cycle back to a URL already visited, so browsers and crawlers loop until they give up — the page is effectively unreachable.",
+    target_state: "Each URL redirects toward a single final destination with no cycles.",
+    recommendation:
+      "Trace the redirect chain and break the cycle: point the looping URL straight at the intended final page. Conflicting redirect rules (server config + CMS + plugin) are a common cause.",
+  },
+  too_many_redirects: {
+    category: "seo",
+    severity: "warning",
+    why: "More than two redirect hops before the final page slow down every visit and waste crawl budget, and each extra hop is another chance for the chain to break.",
+    target_state: "Any redirect reaches its final destination in one hop.",
+    recommendation:
+      "Collapse the chain: redirect the original URL directly to the final destination instead of through intermediate URLs.",
+  },
+  broken_internal_link: {
+    category: "seo",
+    severity: "error",
+    why: "A link on this page points to another page on the same site that returns an error. Visitors hit a dead end and search engines waste crawl budget following it.",
+    target_state: "Every internal link points to a live, 200 page.",
+    recommendation:
+      "Update the link to the correct working URL, or remove it if the destination is gone. Watch for links in templates/menus, which must be fixed in the template, not the page content.",
+  },
+  orphaned_page: {
+    category: "seo",
+    severity: "warning",
+    why: "No other crawled page links to this one, so search engines can only find it via the sitemap and it receives little internal link equity. Orphaned pages often signal a navigation or linking gap.",
+    target_state: "The page is reachable through at least one internal link from relevant pages.",
+    recommendation:
+      "Add internal links to this page from related content, a category/hub page, or the navigation, so both users and crawlers can discover it.",
+  },
+  deep_crawl_depth: {
+    category: "seo",
+    severity: "warning",
+    why: "The page is more than four clicks from the homepage, so crawlers reach it infrequently and it receives little authority. Buried pages are often crawled rarely or missed.",
+    target_state: "Important pages are within about three clicks of the homepage.",
+    recommendation:
+      "Shorten the path to this page: link to it from a higher-level page, add it to navigation or a hub page, or flatten an over-nested category structure.",
+  },
+
+  // -------------------------------------------------------------------------
+  // Crawlability — robots.txt & sitemap
+  // -------------------------------------------------------------------------
+  robots_missing: {
+    category: "seo",
+    severity: "notice",
+    why: "No robots.txt was found at the site root. Search engines still crawl, but you lose the ability to control crawl rules and to point crawlers at your sitemap.",
+    target_state: "A robots.txt exists at the root, allows the pages you want crawled, and declares your sitemap.",
+    recommendation:
+      "Publish a /robots.txt at the site root. At minimum add a Sitemap: directive; add Allow/Disallow rules only where you genuinely need them.",
+  },
+  robots_blocks_all: {
+    category: "seo",
+    severity: "error",
+    why: "robots.txt disallows crawling of the site root for the main search crawler, so search engines are told to stay off the entire site — it will not rank at all.",
+    target_state: "robots.txt allows search crawlers to access public pages (no blanket Disallow: /).",
+    recommendation:
+      "Remove the Disallow: / rule for the affected user-agent, unless the site is intentionally hidden (staging). Keep narrow Disallow rules (e.g. admin paths) only.",
+  },
+  robots_blocks_sitemap_path: {
+    category: "seo",
+    severity: "warning",
+    why: "A Disallow rule in robots.txt matches the URL of one of your sitemaps, so search engines are told not to read it — defeating the point of declaring it.",
+    target_state: "The sitemap URL is crawlable (not matched by any Disallow rule).",
+    recommendation:
+      "Remove or narrow the Disallow rule that covers the sitemap path, so crawlers can fetch the sitemap.",
+  },
+  sitemap_unreachable: {
+    category: "seo",
+    severity: "error",
+    why: "The sitemap returns an error or cannot be fetched, so search engines have no reliable list of your pages and may miss new or updated content.",
+    target_state: "The sitemap URL returns 200 with valid XML.",
+    recommendation:
+      "Check that the sitemap URL loads in a browser. If it 404s, enable your CMS/SEO tool's sitemap or fix the path; if it errors, check server status and the sitemap generator.",
+  },
+  sitemap_invalid_xml: {
+    category: "seo",
+    severity: "error",
+    why: "The sitemap URL returns 200 but the body is not valid sitemap XML, so search engines cannot parse it and discover none of its URLs.",
+    target_state: "The sitemap is well-formed XML with a <urlset> or <sitemapindex> root and the correct content type.",
+    recommendation:
+      "Fix the sitemap output so it is valid XML served as application/xml. A plugin conflict or stray output before the XML prolog is a common cause.",
+  },
+  sitemap_empty: {
+    category: "seo",
+    severity: "warning",
+    why: "The sitemap parses correctly but lists zero URLs, so it submits no pages for indexing.",
+    target_state: "The sitemap lists every public URL you want indexed.",
+    recommendation:
+      "Make sure your CMS is publishing public content into the sitemap. Check sitemap settings for post types/sections that may be excluded.",
+  },
+  sitemap_index_children_failed: {
+    category: "seo",
+    severity: "error",
+    why: "The sitemap index opens, but one or more of the child sitemaps it references cannot be fetched — so the URLs in those child sitemaps are never discovered.",
+    target_state: "Every child sitemap referenced by the index returns 200 with valid XML.",
+    recommendation:
+      "Open each child sitemap URL listed in the index and fix the ones that error. Stale references from a removed/changed SEO plugin are a common cause — regenerate the sitemap.",
+  },
+  sitemap_not_declared_in_robots: {
+    category: "seo",
+    severity: "notice",
+    why: "A working sitemap exists, but robots.txt has no Sitemap: directive, so search engines have to guess its location and may discover it more slowly.",
+    target_state: "robots.txt contains a Sitemap: <url> line pointing at your sitemap.",
+    recommendation:
+      "Add a line like `Sitemap: https://example.com/sitemap.xml` to robots.txt so crawlers find the sitemap immediately.",
+  },
+
+  // -------------------------------------------------------------------------
+  // AEO / GEO — extended structured data + social
+  // -------------------------------------------------------------------------
+  aeo_jsonld_duplicate_type: {
+    category: "aeo",
+    severity: "warning",
+    why: "The same schema.org @type appears in more than one JSON-LD block on the page. Search engines and AI engines may use the wrong one or ignore both, and it usually signals a plugin/theme generating duplicate markup.",
+    target_state: "Each schema type appears once per page, from a single authoritative source.",
+    recommendation:
+      "Find which source emits each duplicate block and disable schema output in one of them, keeping a single block per type. Most often two providers (theme + SEO plugin) both inject the same schema.",
+  },
+  aeo_jsonld_conflicting_data: {
+    category: "aeo",
+    severity: "warning",
+    why: "Two JSON-LD blocks of the same type give different values for a key field (headline, author, or a date). Search and AI engines can't tell which is authoritative and may distrust the page's data entirely.",
+    target_state: "All structured-data blocks agree on shared fields, ideally with one block per type.",
+    recommendation:
+      "Decide which value is correct and align (or remove) the conflicting block, so the publication date, author, and headline match across all structured data on the page.",
+  },
+  aeo_jsonld_type_not_recognized: {
+    category: "aeo",
+    severity: "notice",
+    why: "A JSON-LD block declares an @type that does not exist in the schema.org vocabulary — usually a typo (e.g. \"Artical\") or an invented type. Engines silently ignore markup whose type they can't resolve, so it does nothing.",
+    target_state: "Every @type is a valid schema.org type spelled and capitalized correctly.",
+    recommendation:
+      "Correct the @type to a real schema.org type (Article, BlogPosting, Product, FAQPage, HowTo, Organization, WebPage, …), checking exact spelling and case.",
+  },
+  aeo_jsonld_person_incomplete: {
+    category: "aeo",
+    severity: "notice",
+    why: "A Person entity in the structured data has only a name — no url, image, or jobTitle. With nothing to disambiguate them, engines cannot confidently resolve who the person is.",
+    target_state: "Each Person carries at least one identifying field beyond name (url, image, or jobTitle), ideally a sameAs to a known profile.",
+    recommendation:
+      "Add a url (a profile/bio page) to each Person, and ideally an image and jobTitle, plus sameAs pointing to a professional profile for a stronger identity signal.",
+  },
+  aeo_jsonld_faq_without_content: {
+    category: "aeo",
+    severity: "warning",
+    why: "The page declares FAQPage structured data, but most of its questions don't appear as visible headings on the page. Search engines treat schema-only FAQs (not matching visible content) as spam and may penalize the rich result.",
+    target_state: "Every question in the FAQ schema is also visible on the page as a heading followed by its answer.",
+    recommendation:
+      "Either render the FAQ questions as visible headings with their answers, or remove the questions (or the whole FAQPage schema) that have no visible counterpart.",
+  },
+  aeo_jsonld_howto_without_steps: {
+    category: "aeo",
+    severity: "warning",
+    why: "The page declares HowTo structured data, but most of its steps don't appear as visible headings/content. Search engines require every schema step to match visible content and will disqualify the rich result otherwise.",
+    target_state: "Every step in the HowTo schema is visible on the page (as a heading or numbered list item).",
+    recommendation:
+      "Render the steps as visible content matching the schema step names, or remove the steps (or the HowTo schema) that aren't shown on the page.",
+  },
+  aeo_og_incomplete: {
+    category: "aeo",
+    severity: "notice",
+    why: "Some Open Graph tags are present but two or more core ones are missing (og:title, og:description, og:image, og:url, twitter:card). Complete tags help social platforms and AI link-preview engines represent the page accurately when it is shared or cited.",
+    target_state: "The page sets the core social tags: og:title, og:description, og:image, og:url, and twitter:card.",
+    recommendation:
+      "Fill in the missing og:* tags and twitter:card in the page <head>. Provide a social image of at least 1200×630 px for og:image.",
+  },
+  aeo_sitemap_lastmod_missing: {
+    category: "aeo",
+    severity: "notice",
+    why: "Fewer than 80% of the sitemap's URLs carry a <lastmod> date. A truthful <lastmod> helps search and AI engines decide when to recrawl a page; without it, fresh content may be re-indexed more slowly.",
+    target_state: "Most sitemap <url> entries carry a real <lastmod> reflecting the content's last update.",
+    recommendation:
+      "Regenerate the sitemap so each <url> includes a <lastmod> derived from the real modification date. Most sitemap generators have a toggle for this — only emit lastmod when it reflects a genuine content change.",
+  },
 };
 
 /** A generic fallback for any code without a dedicated profile. */
