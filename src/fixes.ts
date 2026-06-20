@@ -322,7 +322,6 @@ function buildProposal(issue: Issue, page: PageData | null): FixProposal | null 
     case "broken_redirect":
     case "redirect_loop":
     case "too_many_redirects":
-    case "slow_page":
       return infraProposal(issue, "server", "Resolve at the server / redirect-rule level.");
     default:
       break;
