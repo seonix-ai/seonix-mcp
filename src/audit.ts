@@ -1450,12 +1450,11 @@ export function checkTitleLowercase(p: PageData): Issue[] {
 
 // ---------------------------------------------------------------------------
 // Content / links / indexability — mirror checks.go (checkContent, checkLinks,
-// checkNoindex, checkPagePerformance large_page, checkSoft404)
+// checkNoindex, checkSoft404)
 // ---------------------------------------------------------------------------
 
 const LOW_WORD_COUNT = 300;
 const SOFT_404_MAX_WORDS = 100;
-const LARGE_PAGE_BYTES = 3 * 1024 * 1024; // 3 MB
 
 /** Title fragments that, with a thin body, signal a "200 but really an error" page. */
 const SOFT_404_INDICATORS = [
@@ -1507,20 +1506,6 @@ export function checkNoindex(p: PageData): Issue[] {
       url: p.url,
       message: "Page is set to noindex — it is excluded from search engines. Verify this is intentional.",
       evidence: { robots_directives: p.robotsDirectives, x_robots_tag: p.xRobotsTag },
-    },
-  ];
-}
-
-export function checkLargePage(p: PageData): Issue[] {
-  if (!okStatus(p)) return [];
-  if (p.htmlBytes <= LARGE_PAGE_BYTES) return [];
-  return [
-    {
-      code: "large_page",
-      severity: "warning",
-      url: p.url,
-      message: `The HTML document is ${kb(p.htmlBytes)} (over 3 MB) — slow to download, especially on mobile.`,
-      evidence: { page_size_bytes: p.htmlBytes, page_size_mb: (p.htmlBytes / (1024 * 1024)).toFixed(1) },
     },
   ];
 }
@@ -2062,7 +2047,6 @@ export function checkPage(p: PageData): Issue[] {
     ...checkNoindex(p),
     ...checkLowWordCount(p),
     ...checkNoInternalLinks(p),
-    ...checkLargePage(p),
     ...checkSoft404(p),
     ...checkOpenGraph(p),
     ...checkStructuredData(p),

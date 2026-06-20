@@ -494,14 +494,6 @@ const RECOMMENDATIONS: Record<string, Recommendation> = {
     recommendation:
       "If this page should rank, remove the noindex directive (use index, follow). If it is meant to be hidden (thank-you pages, internal search results), the noindex is correct — no action needed.",
   },
-  large_page: {
-    category: "seo",
-    severity: "warning",
-    why: "A very large HTML document (over ~3 MB) is slow to download and parse, especially on mobile connections, hurting both user experience and rankings.",
-    target_state: "The HTML document is well under ~3 MB.",
-    recommendation:
-      "Reduce the document size: move large inline styles/scripts to external cacheable files, remove duplicated or dead markup, and paginate or lazy-load very long content.",
-  },
   soft_404: {
     category: "seo",
     severity: "error",
